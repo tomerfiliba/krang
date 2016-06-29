@@ -1,0 +1,7 @@
+module foo;
+
+// some comment
+
+void main() {
+    int a = 5;
+}
