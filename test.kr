@@ -1,7 +1,11 @@
 module foo;
 
 // some comment
+/+ another
+    /+ comment +/
++/
 
 void main() {
-    int a = 5;
+    auto a = 5.3e4;
+    auto b = "hello\n world";
 }

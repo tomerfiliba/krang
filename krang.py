@@ -1,12 +1,22 @@
+from symbol import dotted_name
 class AstNode():
-    members=["attributes", "file", "line", "scope"]
+    members=["attributes", "token_span", "children"]
     def __init__(self, **kw):
         all_members = set(sum(cls.members for cls in self.__class__.mro() if hasattr(cls, "members")))
         assert set(kw.keys).issubset(all_members), kw.keys - all_members
         self.__dict__.update(kw)
+        if not hasattr(self, "children"):
+            self.children = None
 
     def __repr__(self):
         return "%s(%s)" % (self.__class__.__name__, ", ".join("%s=%r" % (k, v) for k, v in self.__dict__.items()))
+
+    def show(self, nesting=0):
+        attrs = ", ".join("%s=%r" % (k, v) for k, v in self.__dict__.items() if k != "children")
+        print("%s%s(%s)" % ("  " * nesting, self.__class__.__name__, attrs))
+        for child in self.children:
+            child.show(nesting+1)
+
 
 class Module(AstNode): members = ["name"]
 class VarDecl(AstNode): pass
@@ -33,6 +43,9 @@ class Token():
 
     def __repr__(self):
         return "%s(%r) at %s:%s,%s" % (self.type, "" if self.value is None else self.value, self.file, self.line, self.col)
+    def __eq__(self, rhs):
+        return (self.type, self.value) == rhs
+
 
 class TokenizerError(Exception):
     def __init__(self, msg, file, line, col, **kw):
@@ -42,23 +55,26 @@ class TokenizerError(Exception):
         self.col = col
         self.kw = kw
 
+    def __str__(self):
+        return "[%s:%s,%s] %s %s" % (self.file, self.line, self.col, self.msg, self.kw if self.kw else "")
+
 class Tokenizer():
     double_char_ops = frozenset(["++", "--", ">>", "<<", "**", "&&", "||", ">=", "<=", "==", "!="])
     double_char_asgn = frozenset(["+=", "-=", "*=", "/=", "%=", "&=", "|=", ">>=", "<<="])
     triple_char_asgn = frozenset([">>=", "<<="])
     comment_markers = frozenset(["//", "/+", "/*"])
-    keywords = ["if", "for", "else", "while", "true", "false", "null", "import", "module", ]
-    builtin_types = ["void", "bool", "char",
+    keywords = frozenset(["if", "for", "else", "while", "true", "false", "null", "import", "module", "macro"])
+    builtin_types = frozenset(["void", "bool", "char",
                      "uint8", "uint16", "uint32", "uint64", "uint128",
                      "sint8", "sint16", "sint32", "sint64", "sint128",
-                     "float32", "float64", "float128"]
+                     "float32", "float64", "float128"])
 
     def __init__(self, filename):
         self.filename = filename
         with open(filename, "r") as f:
             self.text = f.read()
         self.file_offset = 0
-        self.col_num = 1
+        self.col_num = 0
         self.line_num = 1
 
     def read_char(self):
@@ -68,7 +84,7 @@ class Tokenizer():
         self.col_num += 1
         if ch == "\n":
             self.line_num += 1
-            self.col_num = 1
+            self.col_num = 0
         self.file_offset += 1
         return ch
 
@@ -76,7 +92,7 @@ class Tokenizer():
         return self.text[self.file_offset+offset] if self.file_offset+offset < len(self.text) else None
 
     def fail(self, msg, **kw):
-        raise TokenizerError(msg, self.filename, self.line_num, self.col_num, kw)
+        raise TokenizerError(msg, self.filename, self.line_num, self.col_num, **kw)
 
     def read_string(self, mode, terminator):
         res = ""
@@ -318,7 +334,7 @@ class Tokenizer():
         if res in self.keywords:
             return self.make_token("kwd", res)
         elif res in self.builtin_types:
-            return self.make_token("type", res)
+            return self.make_token("blt", res)
         else:
             return self.make_token("id", res)
 
@@ -347,7 +363,9 @@ class Tokenizer():
                 yield self.make_token("end")
             elif ch == ";":
                 yield self.make_token("eos")
-            elif ch in "()[]+-*~/%^&|~!=><:":
+            elif ch == "@":
+                yield self.make_token("at")
+            elif ch in "()[]+-*~/%^&|~!=><:,":
                 tok = self.read_op(ch)
                 if tok:
                     yield tok
@@ -363,10 +381,70 @@ class Tokenizer():
             else:
                 self.fail("Invalid token '%s'" % (ch,))
 
+class Parser():
+    def __init__(self, tokens):
+        self.tokens = list(tokens)
+        self._pos = 0
+    def match(self, type, value=None):
+        if self._pos >= len(self.tokens):
+            return None
+        tok = self.tokens[self._pos]
+        if tok.type == type and (value is None or tok.value == value):
+            self._pos += 1
+            return tok
+        else:
+            return False
+    def matchOrFail(self, type, value=None):
+        t = self.match(type, value)
+        if not t:
+            self.fail("Expected %s(%s)" % (type, value))
+        return t
+    def fail(self, msg):
+        raise Exception(msg)
+
+    def pop_dotted_name(self):
+        t = self.match("id")
+        if not t:
+            return None
+        name = [t]
+        while True:
+            t = self.match("dot")
+            if not t:
+                break
+            name.append(self.matchOrFail("id").value)
+        return name
+
+    def parse_module(self):
+        self.matchOrFail("kwd", "module")
+        name = self.pop_dotted_name()
+        self.matchOrFail("eos")
+        node = Module(name=name, children=[])
+        while self._pos < len(self.tokens):
+            node.children.append(self.parse_top_level())
+
+    def parse_top_level(self):
+        if self.match("kwd", "import"):
+            return self.parse_import()
+        elif self.match("kwd", "struct"):
+            return self.parse_struct()
+        else:
+            self.fail("Invalid top-level element")
+
+    def parse_import(self):
+        #("kwd", "import").pop_dotted_name
+        pass
+
+#dotted_name = Seq(Id, Repeat(Seq(Dot, Id)), Eos)
+#module_stmt = Seq(Kwd("module"), dotted_name, Eos)
+#import_stmt = Seq(Kwd("import"), dotted_name, Opt(Seq(Op(":"), Id)), Eos)
+block =
+if_stmt = Seq(Kwd("if"), Op("("), expr, Op(")"), block)
+
+
 
 if __name__ == "__main__":
-    for tok in Tokenizer("test.kr"):
-        print(tok)
+    ast = Parser(Tokenizer("test.kr")).parse_module()
+    print(ast)
 
 
 
