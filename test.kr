@@ -1,11 +1,23 @@
 module foo;
 
+import std.stdio: foo, bar, eggs;
+import std.stdint: spam;
+import std.string;
+
+
 // some comment
 /+ another
     /+ comment +/
 +/
+/**/
 
-void main() {
-    auto a = 5.3e4;
-    auto b = "hello\n world";
+struct Point {
+    int[5] x;
+    int y;
+}
+
+
+pure func main() void {
+    var a = 5.3e4;
+    var b = "hello\n world";
 }

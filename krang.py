@@ -1,53 +1,21 @@
-from symbol import dotted_name
-class AstNode():
-    members=["attributes", "token_span", "children"]
-    def __init__(self, **kw):
-        all_members = set(sum(cls.members for cls in self.__class__.mro() if hasattr(cls, "members")))
-        assert set(kw.keys).issubset(all_members), kw.keys - all_members
-        self.__dict__.update(kw)
-        if not hasattr(self, "children"):
-            self.children = None
-
-    def __repr__(self):
-        return "%s(%s)" % (self.__class__.__name__, ", ".join("%s=%r" % (k, v) for k, v in self.__dict__.items()))
-
-    def show(self, nesting=0):
-        attrs = ", ".join("%s=%r" % (k, v) for k, v in self.__dict__.items() if k != "children")
-        print("%s%s(%s)" % ("  " * nesting, self.__class__.__name__, attrs))
-        for child in self.children:
-            child.show(nesting+1)
-
-
-class Module(AstNode): members = ["name"]
-class VarDecl(AstNode): pass
-class VarRef(AstNode): pass
-class StructDecl(AstNode): pass
-class FuncDecl(AstNode): pass
-class Transformation(AstNode): pass
-class Attribute(AstNode): pass
-class ErrorNode(AstNode): pass
-
-class IfStmt(AstNode): members = ["cond", "block"]
-class ElseStmt(AstNode): members = ["block"]
-class WhileStmt(AstNode): members = ["cond", "block"]
-
-
 class Token():
-    __slots__ = ["type", "value", "file", "line", "col"]
+    __slots__ = ["type", "value", "file", "line", "col", "idx"]
     def __init__(self, type, value, file, line, col):
         self.type = type
         self.value = value
         self.file = file
         self.line = line
         self.col = col
+        self.idx = None
 
     def __repr__(self):
-        return "%s(%r) at %s:%s,%s" % (self.type, "" if self.value is None else self.value, self.file, self.line, self.col)
+        #return "%s(%r) at %s:%s,%s" % (self.type, "" if self.value is None else self.value, self.file, self.line, self.col)
+        return "%s(%r)" % (self.type, "" if self.value is None else self.value)
     def __eq__(self, rhs):
         return (self.type, self.value) == rhs
 
 
-class TokenizerError(Exception):
+class BadSyntax(Exception):
     def __init__(self, msg, file, line, col, **kw):
         self.msg = msg
         self.file = file
@@ -63,11 +31,6 @@ class Tokenizer():
     double_char_asgn = frozenset(["+=", "-=", "*=", "/=", "%=", "&=", "|=", ">>=", "<<="])
     triple_char_asgn = frozenset([">>=", "<<="])
     comment_markers = frozenset(["//", "/+", "/*"])
-    keywords = frozenset(["if", "for", "else", "while", "true", "false", "null", "import", "module", "macro"])
-    builtin_types = frozenset(["void", "bool", "char",
-                     "uint8", "uint16", "uint32", "uint64", "uint128",
-                     "sint8", "sint16", "sint32", "sint64", "sint128",
-                     "float32", "float64", "float128"])
 
     def __init__(self, filename):
         self.filename = filename
@@ -92,7 +55,7 @@ class Tokenizer():
         return self.text[self.file_offset+offset] if self.file_offset+offset < len(self.text) else None
 
     def fail(self, msg, **kw):
-        raise TokenizerError(msg, self.filename, self.line_num, self.col_num, **kw)
+        raise BadSyntax(msg, self.filename, self.line_num, self.col_num, **kw)
 
     def read_string(self, mode, terminator):
         res = ""
@@ -251,7 +214,7 @@ class Tokenizer():
                 assert False, mode
 
         if mode in ["exp3", "frac"]:
-            return self.make_token("float", res)
+            return self.make_token("flt", res)
         elif mode == "d":
             return self.make_token("int", int(res, 10))
         elif mode == "o":
@@ -325,18 +288,13 @@ class Tokenizer():
         res = ch
         while True:
             ch = self.peek_char()
-            if ch in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789":
+            if ch in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_0123456789.":
                 self.read_char()
                 res += ch
             else:
                 break
 
-        if res in self.keywords:
-            return self.make_token("kwd", res)
-        elif res in self.builtin_types:
-            return self.make_token("blt", res)
-        else:
-            return self.make_token("id", res)
+        return self.make_token("dotted" if "." in res else "sym", res)
 
     def make_token(self, type, value=None):
         return Token(type, value, self.filename, self.line_num, self.col_num)
@@ -381,71 +339,238 @@ class Tokenizer():
             else:
                 self.fail("Invalid token '%s'" % (ch,))
 
-class Parser():
+    def get_stream(self):
+        tokens = []
+        for i, t in enumerate(self):
+            t.idx = i
+            tokens.append(t)
+        return TokenStream(tokens)
+
+class TokenStream():
     def __init__(self, tokens):
-        self.tokens = list(tokens)
+        self._tokens = tokens
         self._pos = 0
-    def match(self, type, value=None):
-        if self._pos >= len(self.tokens):
+    def tell(self):
+        return self._pos
+    def seek(self, pos):
+        assert (pos <= self._pos)
+        self._pos = pos
+    def peek(self):
+        return self._tokens[self._pos] if self._pos < len(self._tokens) else None
+    def pop(self):
+        if self._pos >= len(self._tokens):
             return None
-        tok = self.tokens[self._pos]
-        if tok.type == type and (value is None or tok.value == value):
+        t = self._tokens[self._pos]
+        self._pos += 1
+        return t
+    def match(self, type, value=NotImplemented):
+        if self._pos >= len(self._tokens):
+            return False
+        t = self._tokens[self._pos]
+        if t.type == type and (value is NotImplemented or value == t.value):
             self._pos += 1
-            return tok
+            return t
         else:
             return False
-    def matchOrFail(self, type, value=None):
-        t = self.match(type, value)
-        if not t:
-            self.fail("Expected %s(%s)" % (type, value))
-        return t
-    def fail(self, msg):
-        raise Exception(msg)
 
-    def pop_dotted_name(self):
-        t = self.match("id")
-        if not t:
-            return None
-        name = [t]
-        while True:
-            t = self.match("dot")
-            if not t:
-                break
-            name.append(self.matchOrFail("id").value)
-        return name
+#=======================================================================================================================
 
-    def parse_module(self):
-        self.matchOrFail("kwd", "module")
-        name = self.pop_dotted_name()
-        self.matchOrFail("eos")
-        node = Module(name=name, children=[])
-        while self._pos < len(self.tokens):
-            node.children.append(self.parse_top_level())
-
-    def parse_top_level(self):
-        if self.match("kwd", "import"):
-            return self.parse_import()
-        elif self.match("kwd", "struct"):
-            return self.parse_struct()
+class Production():
+    __slots__ = ("keep")
+    def parse(self, tokens):
+        raise NotImplementedError()
+    def __add__(self, rhs):
+        if isinstance(self, Seq):
+            if isinstance(rhs, Seq):
+                self.prods.extend(rhs.prods)
+            else:
+                self.prods.append(rhs)
+            return self
+        elif isinstance(rhs, Seq):
+            rhs.prods.insert(0, self)
+            return rhs
         else:
-            self.fail("Invalid top-level element")
+            return Seq(self, rhs)
+    def __invert__(self):
+        return Opt(self)
+    def __rshift__(self, func):
+        return Transform(self, func)
+    def __or__(self, rhs):
+        if isinstance(self, FirstMatch):
+            if isinstance(rhs, FirstMatch):
+                self.prods.extend(rhs.prods)
+            else:
+                self.prods.append(rhs)
+            return self
+        elif isinstance(rhs, FirstMatch):
+            rhs.prods.insert(0, self)
+            return rhs
+        else:
+            return FirstMatch(self, rhs)
 
-    def parse_import(self):
-        #("kwd", "import").pop_dotted_name
-        pass
+class Seq(Production):
+    __slots__ = ("prods",)
+    def __init__(self, *prods):
+        self.prods = list(prods)
+    def parse(self, tokens):
+        start_pos = tokens.tell()
+        res = []
+        for p in self.prods:
+            r = p.parse(tokens)
+            if r is False:
+                tokens.seek(start_pos)
+                return False
+            if getattr(p, "keep", True):
+                res.append(r)
+        end_pos = tokens.tell()
+        return res
+    def __repr__(self):
+        return "Seq(%s)" % (", ".join(repr(p) for p in self.prods),)
 
-#dotted_name = Seq(Id, Repeat(Seq(Dot, Id)), Eos)
-#module_stmt = Seq(Kwd("module"), dotted_name, Eos)
-#import_stmt = Seq(Kwd("import"), dotted_name, Opt(Seq(Op(":"), Id)), Eos)
-block =
-if_stmt = Seq(Kwd("if"), Op("("), expr, Op(")"), block)
+class Opt(Production):
+    __slots__ = ("prod",)
+    def __init__(self, prod):
+        self.prod = prod
+    def parse(self, tokens):
+        r = self.prod.parse(tokens)
+        return None if r is False else r
+    def __repr__(self):
+        return "Opt(%r)" % (self.prod,)
+
+class Tok(Production):
+    __slots__ = ("type", "value")
+    def __init__(self, type, value=NotImplemented, keep=False):
+        self.type = type
+        self.value = value
+        self.keep = keep
+    def parse(self, tokens):
+        return tokens.match(self.type, self.value)
+    def __repr__(self):
+        return "%s(%r)" % (self.type, "" if self.value is NotImplemented else self.value)
+
+class Repeat(Production):
+    __slots__ = ("prod",)
+    def __init__(self, prod):
+        self.prod = prod
+    def parse(self, tokens):
+        res = []
+        while True:
+            r = self.prod.parse(tokens)
+            if r is False:
+                break
+            res.append(r)
+        return res
+    def __repr__(self):
+        return "Repeat(%r)" % (self.prod,)
+
+class Transform(Production):
+    __slots__ = ("prod", "func")
+    def __init__(self, prod, func):
+        self.prod = prod
+        self.func = func
+    def parse(self, tokens):
+        p = self.prod.parse(tokens)
+        if p is False:
+            return False
+        return self.func(p)
+    def __repr__(self):
+        return "Transform(%r, %r)" % (self.prod, self.func)
+
+class Lazy(Production):
+    __slots__ = ("prodfunc",)
+    def __init__(self, prodfunc):
+        self.prodfunc = prodfunc
+    def parse(self, tokens):
+        return self.prodfunc().parse(tokens)
+    def __repr__(self):
+        return "Lazy(lambda: %r)" % (self.prodfunc(),)
+
+class FirstMatch(Production):
+    __slots__ = ("prods",)
+    def __init__(self, *prods):
+        self.prods = list(prods)
+    def parse(self, tokens):
+        pos = tokens.tell()
+        for p in self.prods:
+            r = p.parse(tokens)
+            if r is not False:
+                return r
+            tokens.seek(pos)
+        return False
+    def __repr__(self):
+        return "FirstMatch(%s)" % (", ".join(repr(p) for p in self.prods),)
+
+#=======================================================================================================================
+
+class AstNode():
+    members=["attributes", "token_span", "children"]
+    def __init__(self, **kw):
+        all_members = set(sum((cls.members for cls in self.__class__.mro() if hasattr(cls, "members")), []))
+        assert set(kw.keys()).issubset(all_members), kw.keys() - all_members
+        self.__dict__.update(kw)
+        if not hasattr(self, "children"):
+            self.children = []
+
+    def __repr__(self):
+        return "%s(%s)" % (self.__class__.__name__, ", ".join("%s=%r" % (k, v) for k, v in self.__dict__.items() if k!="children" or v))
+
+    def show(self, nesting=0):
+        attrs = ", ".join("%s=%r" % (k, v) for k, v in self.__dict__.items() if k != "children")
+        print("%s%s(%s)" % ("  " * nesting, self.__class__.__name__, attrs))
+        for child in self.children:
+            if hasattr(child, "show"):
+                child.show(nesting+1)
+            else:
+                print("%s%r" % ("  " * (nesting+1), child))
 
 
+class Module(AstNode): members = ["name"]
+class Import(AstNode): members = ["mod", "names"]
+class VarDef(AstNode): members = ["name", "type"]
+class VarRef(AstNode): members = ["name"]
+class StructDef(AstNode): members = ["name"]
+class FuncDecl(AstNode): pass
+class Attribute(AstNode): pass
+class ErrorNode(AstNode): pass
+
+class ExprStatement(AstNode): members = ["head", "args"]
+class BlockStatement(AstNode): members = ["head", "args"]
+
+eos = Tok("eos")
+comma = Tok("op", ",")
+colon = Tok("op", ":")
+begin = Tok("begin")
+end = Tok("end")
+
+def kwd(n, keep=False): return Tok("sym", n, keep=keep)
+def op(n, keep=True): return Tok("op", n, keep=keep)
+
+word = Tok("sym", NotImplemented, keep=True) >> (lambda p: p.value)
+dotted = (Tok("sym", NotImplemented, keep=True) | Tok("dotted", NotImplemented, keep=True)) >> (lambda p: p.value)
+module_stmt = kwd("module") + dotted + eos >> (lambda p: Module(name=p[0]))
+import_stmt = kwd("import") + dotted + ~(colon + word + Repeat(comma + word) >> (lambda prods: [prods[0]] + sum(prods[1], []))) + eos  >> (lambda p: Import(mod=p[0], names=p[1]))
+literal = Tok("str") | Tok("int") | Tok("float")
+expr = literal
+subscript = op("[", keep=False) + expr + op("]", keep=False)
+typename = dotted + Repeat(subscript)
+var_def = typename + word + eos
+struct_body = Repeat(var_def)
+struct_def = kwd("struct") + word + begin + struct_body + end >> (lambda p: StructDef(name=p[0], children=p[1]))
+
+top_level = import_stmt | struct_def
+def mk_module(p):
+    p[0].children = p[1]
+    return p[0]
+root = module_stmt + Repeat(top_level) >> mk_module
 
 if __name__ == "__main__":
-    ast = Parser(Tokenizer("test.kr")).parse_module()
-    print(ast)
-
+    tokens = Tokenizer("test.kr").get_stream()
+    root.parse(tokens).show()
+#     print(module_stmt.parse(tokens))
+#     print(import_stmt.parse(tokens))
+#     print(import_stmt.parse(tokens))
+#     print(import_stmt.parse(tokens))
+#     print(struct_def.parse(tokens))
 
 
 
