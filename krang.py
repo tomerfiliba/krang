@@ -566,12 +566,6 @@ root = module_stmt + Repeat(top_level) >> mk_module
 if __name__ == "__main__":
     tokens = Tokenizer("test.kr").get_stream()
     root.parse(tokens).show()
-#     print(module_stmt.parse(tokens))
-#     print(import_stmt.parse(tokens))
-#     print(import_stmt.parse(tokens))
-#     print(import_stmt.parse(tokens))
-#     print(struct_def.parse(tokens))
-
 
 
 
