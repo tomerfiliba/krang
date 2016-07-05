@@ -503,44 +503,50 @@ class FirstMatch(Production):
 #=======================================================================================================================
 
 class AstNode():
-    members=["attributes", "token_span", "children"]
     def __init__(self, **kw):
-        all_members = set(sum((cls.members for cls in self.__class__.mro() if hasattr(cls, "members")), []))
-        assert set(kw.keys()).issubset(all_members), kw.keys() - all_members
         self.__dict__.update(kw)
-        if not hasattr(self, "children"):
-            self.children = []
 
     def __repr__(self):
-        return "%s(%s)" % (self.__class__.__name__, ", ".join("%s=%r" % (k, v) for k, v in self.__dict__.items() if k!="children" or v))
+        return "%s(%s)" % (self.__class__.__name__, ", ".join("%s=%r" % (k, v) for k, v in self.__dict__.items()))
 
     def show(self, nesting=0):
-        attrs = ", ".join("%s=%r" % (k, v) for k, v in self.__dict__.items() if k != "children")
+        attrs = ", ".join("%s=%r" % (k, v) for k, v in self.__dict__.items() if k != "body")
         print("%s%s(%s)" % ("  " * nesting, self.__class__.__name__, attrs))
-        for child in self.children:
-            if hasattr(child, "show"):
-                child.show(nesting+1)
-            else:
-                print("%s%r" % ("  " * (nesting+1), child))
+        body = getattr(self, "body", ())
+        if hasattr(body, "show"):
+            body.show(nesting+1)
+        elif hasattr(body, "__iter__"):
+            for child in body:
+                if hasattr(child, "show"):
+                    child.show(nesting+1)
+                else:
+                    print("%s%r" % ("  " * (nesting+1), child))
+        else:
+            print("%s%r" % ("  " * (nesting+1), body))
 
 
-class Module(AstNode): members = ["name"]
-class Import(AstNode): members = ["mod", "names"]
-class VarDef(AstNode): members = ["name", "type"]
-class VarRef(AstNode): members = ["name"]
-class StructDef(AstNode): members = ["name"]
-class FuncDecl(AstNode): pass
-class Attribute(AstNode): pass
-class ErrorNode(AstNode): pass
+class Module(AstNode): pass
+class Import(AstNode): pass
+class VarDef(AstNode): pass
+class VarRef(AstNode): pass
 
-class ExprStatement(AstNode): members = ["head", "args"]
-class BlockStatement(AstNode): members = ["head", "args"]
+class StructDef(AstNode): pass
+class TypeName(AstNode): pass
+class FuncDef(AstNode): pass
+class If(AstNode): pass
+class Else(AstNode): pass
+class While(AstNode): pass
+class Return(AstNode): pass
+class Continue(AstNode): pass
+class Break(AstNode): pass
+
 
 eos = Tok("eos")
 comma = Tok("op", ",")
 colon = Tok("op", ":")
 begin = Tok("begin")
 end = Tok("end")
+at = Tok("at")
 
 def kwd(n, keep=False): return Tok("sym", n, keep=keep)
 def op(n, keep=True): return Tok("op", n, keep=keep)
@@ -548,24 +554,44 @@ def op(n, keep=True): return Tok("op", n, keep=keep)
 word = Tok("sym", NotImplemented, keep=True) >> (lambda p: p.value)
 dotted = (Tok("sym", NotImplemented, keep=True) | Tok("dotted", NotImplemented, keep=True)) >> (lambda p: p.value)
 module_stmt = kwd("module") + dotted + eos >> (lambda p: Module(name=p[0]))
-import_stmt = kwd("import") + dotted + ~(colon + word + Repeat(comma + word) >> (lambda prods: [prods[0]] + sum(prods[1], []))) + eos  >> (lambda p: Import(mod=p[0], names=p[1]))
-literal = Tok("str") | Tok("int") | Tok("float")
+import_stmt = kwd("import") + dotted + ~(colon + word + Repeat(comma + word) >> (lambda prods: [prods[0]] + sum(prods[1], []))) + eos  >> (lambda p: Import(module=p[0], names=p[1]))
+literal = Tok("str") | Tok("int") | Tok("flt")
 expr = literal
-subscript = op("[", keep=False) + expr + op("]", keep=False)
-typename = dotted + Repeat(subscript)
-var_def = typename + word + eos
-struct_body = Repeat(var_def)
-struct_def = kwd("struct") + word + begin + struct_body + end >> (lambda p: StructDef(name=p[0], children=p[1]))
 
-top_level = import_stmt | struct_def
+macro = at + dotted >> (lambda p: p[0]) #+ ~(op("(", keep=False) +  + op(")", keep=False))
+macros = Repeat(macro)
+
+subscript = op("[", keep=False) + expr + op("]", keep=False) >> (lambda prods: prods[0])
+typename = dotted + Repeat(subscript) >> (lambda prods: TypeName(name=prods[0], subscripts=prods[1]))
+var_def = macros + typename + word + ~(Tok("asgn", "=") + expr) + eos >> (lambda p: VarDef(macros=p[0], type=p[1], name=p[2], init=p[3]))
+struct_body = Repeat(var_def)
+struct_def = macros + kwd("struct") + word + begin + struct_body + end >> (lambda p: StructDef(macros=p[0], name=p[1], body=p[2]))
+func_arg = macros + typename + word >> (lambda p: VarDef(macros=p[0], type=p[1], name=p[2]))
+func_args = Repeat(func_arg + comma) + Opt(func_arg) >> (lambda prods: (prods[0] + [prods[1]]) if prods[1] else prods[0])
+
+suite = (begin + Repeat(Lazy(lambda: stmt)) + end) | Lazy(lambda: stmt)
+else_stmt = kwd("else") + suite >> (lambda p: Else(body=p[0]))
+if_stmt = kwd("if") + op("(", keep=False) + expr + op(")", keep=False) + suite + ~else_stmt >> (lambda p: If(cond=p[0], body=p[1], else_=p[2]))
+while_stmt = kwd("while") + op("(", keep=False) + expr + op(")", keep=False) + suite >> (lambda p: While(cond=p[0], body=p[1]))
+return_stmt = kwd("return") + ~expr + eos >> (lambda p: Return(expr=p[0]))
+break_stmt = kwd("break") + eos >> (lambda p: Break(label=None))
+continue_stmt = kwd("continue") + eos >> (lambda p: Continue(label=None))
+#macro_stmt = macro + suite
+
+stmt = var_def | if_stmt | while_stmt | return_stmt | break_stmt | continue_stmt #| macro_stmt
+func_def = macros + typename + word + op("(", keep=False) + func_args + op(")", keep=False) + begin + Repeat(stmt) + end >> (lambda p: FuncDef(macros=p[0], type=p[1], name=p[2], args=p[3], body=p[4]))
+
+
+top_level = import_stmt | struct_def | func_def
 def mk_module(p):
-    p[0].children = p[1]
+    p[0].body = p[1]
     return p[0]
 root = module_stmt + Repeat(top_level) >> mk_module
 
 if __name__ == "__main__":
     tokens = Tokenizer("test.kr").get_stream()
     root.parse(tokens).show()
+    assert tokens.pop() is None
 
 
 

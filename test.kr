@@ -16,8 +16,13 @@ struct Point {
     int y;
 }
 
+@pure void main() {
+    float a = 3.14e15;
+    string b = "hello\n world";
+    if (4)
+        return 8;
 
-pure func main() void {
-    var a = 5.3e4;
-    var b = "hello\n world";
+    else
+        return 9;
+
 }
